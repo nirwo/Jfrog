@@ -160,7 +160,7 @@ class JFrogAnalyser:
                     package_type=repo_data.get('packageType', 'unknown')
                 )
         
-        # Add edges for repository relationships
+        # First pass: Add all direct relationships (includes and remotes)
         for instance in self.instances:
             for repo_key, repo_data in instance.repositories.items():
                 source_node = f"{instance.name}:{repo_key}"
@@ -206,6 +206,63 @@ class JFrogAnalyser:
                             )
                             logger.debug(f"Added include edge: {source_node} -> {target_node}")
         
+        # Second pass: Handle complex dependencies between virtual and remote repos
+        # This handles the case of: virtual repo -> includes -> remote repo -> points to -> another virtual repo
+        def traverse_complex_paths(start_node, current_node, visited=None):
+            """
+            Recursively traverse the repository graph to find complex paths.
+            
+            Args:
+                start_node: The starting node (virtual repo)
+                current_node: The current node in the traversal
+                visited: Set of visited nodes to avoid infinite recursion
+            """
+            if visited is None:
+                visited = set()
+                
+            if current_node in visited:
+                return
+                
+            visited.add(current_node)
+            
+            # Get the node's repo type
+            current_type = self.repository_graph.nodes[current_node].get('repo_type')
+            
+            # For all successors of the current node
+            for successor in list(self.repository_graph.successors(current_node)):
+                successor_type = self.repository_graph.nodes[successor].get('repo_type')
+                edge_data = self.repository_graph.get_edge_data(current_node, successor)
+                edge_type = edge_data.get('edge_type') if edge_data else None
+                
+                # Case 1: If current is virtual and successor is remote
+                if current_type == 'virtual' and successor_type == 'remote' and edge_type == 'includes':
+                    # Look at where the remote points to
+                    for remote_target in list(self.repository_graph.successors(successor)):
+                        remote_target_type = self.repository_graph.nodes[remote_target].get('repo_type')
+                        remote_edge_data = self.repository_graph.get_edge_data(successor, remote_target)
+                        remote_edge_type = remote_edge_data.get('edge_type') if remote_edge_data else None
+                        
+                        # If remote points to a virtual repo, add a direct edge
+                        if remote_target_type == 'virtual' and remote_edge_type == 'remote':
+                            # Add a direct edge from the original virtual repo to the target virtual repo
+                            self.repository_graph.add_edge(
+                                start_node,
+                                remote_target,
+                                edge_type='complex_dependency'
+                            )
+                            logger.debug(f"Added complex dependency edge: {start_node} -> {remote_target}")
+                            
+                            # Continue traversal from this new virtual repo
+                            traverse_complex_paths(start_node, remote_target, visited)
+                
+                # Continue traversal recursively for all successors
+                traverse_complex_paths(start_node, successor, visited)
+        
+        # Find all virtual repositories and start traversal from each
+        for node, data in self.repository_graph.nodes(data=True):
+            if data.get('repo_type') == 'virtual':
+                traverse_complex_paths(node, node)
+        
         logger.info(f"Built repository graph with {self.repository_graph.number_of_nodes()} nodes and {self.repository_graph.number_of_edges()} edges")
     
     def detect_loops(self):
@@ -243,6 +300,7 @@ class JFrogAnalyser:
             table.add_column("Loop #", style="dim")
             table.add_column("Loop Path", style="red")
             table.add_column("Repository Types", style="blue")
+            table.add_column("Loop Type", style="purple")
             
             for i, loop in enumerate(self.detected_loops, 1):
                 path = " → ".join(loop + [loop[0]])  # Add first node again to show complete loop
@@ -253,7 +311,22 @@ class JFrogAnalyser:
                     node_data = self.repository_graph.nodes[node]
                     repo_types.append(f"{node_data.get('repo_type', 'unknown')}")
                 
-                table.add_row(str(i), path, ", ".join(repo_types))
+                # Determine loop type
+                loop_type = "Simple"
+                
+                # Check if this is a complex dependency loop (involving virtual and remote repos)
+                complex_edges_count = 0
+                for j in range(len(loop)):
+                    source = loop[j]
+                    target = loop[(j + 1) % len(loop)]
+                    edge_data = self.repository_graph.get_edge_data(source, target)
+                    if edge_data and edge_data.get('edge_type') == 'complex_dependency':
+                        complex_edges_count += 1
+                
+                if complex_edges_count > 0:
+                    loop_type = f"Complex (with {complex_edges_count} complex dependencies)"
+                
+                table.add_row(str(i), path, ", ".join(repo_types), loop_type)
             
             console.print(table)
         else:
@@ -278,6 +351,31 @@ class JFrogAnalyser:
                 recommendation = f"Point to a specific local or remote repository instead of the virtual repository"
                 
                 table.add_row(remote_name, virtual_name, recommendation)
+            
+            console.print(table)
+            
+        # Report on complex dependency relationships
+        complex_dependencies = [(u, v) for u, v, data in self.repository_graph.edges(data=True) 
+                               if data.get('edge_type') == 'complex_dependency']
+        
+        if complex_dependencies:
+            console.print("\n")
+            table = Table(title=f"Complex Dependency Relationships ({len(complex_dependencies)})")
+            table.add_column("Source Repository", style="cyan")
+            table.add_column("Target Repository", style="magenta")
+            table.add_column("Dependency Path", style="yellow")
+            
+            for source, target in complex_dependencies:
+                source_parts = source.split(":")
+                target_parts = target.split(":")
+                
+                source_name = f"{source_parts[0]}/{source_parts[1]}"
+                target_name = f"{target_parts[0]}/{target_parts[1]}"
+                
+                # Try to find a path to explain this relationship
+                dependency_path = "Virtual repo includes remote repo pointing to virtual repo"
+                
+                table.add_row(source_name, target_name, dependency_path)
             
             console.print(table)
     
@@ -318,8 +416,10 @@ class JFrogAnalyser:
                            if data.get('edge_type') == 'remote']
             include_edges = [(u, v) for u, v, data in self.repository_graph.edges(data=True) 
                             if data.get('edge_type') == 'includes']
+            complex_edges = [(u, v) for u, v, data in self.repository_graph.edges(data=True) 
+                            if data.get('edge_type') == 'complex_dependency']
             other_edges = [(u, v) for u, v, data in self.repository_graph.edges(data=True) 
-                          if data.get('edge_type') not in ['remote', 'includes']]
+                          if data.get('edge_type') not in ['remote', 'includes', 'complex_dependency']]
             
             # Draw edges
             nx.draw_networkx_edges(self.repository_graph, pos, edgelist=remote_edges, 
@@ -328,6 +428,9 @@ class JFrogAnalyser:
             nx.draw_networkx_edges(self.repository_graph, pos, edgelist=include_edges, 
                                   width=1.5, alpha=0.7, edge_color='red', 
                                   connectionstyle='arc3,rad=0.1', label='Includes')
+            nx.draw_networkx_edges(self.repository_graph, pos, edgelist=complex_edges, 
+                                  width=2.0, alpha=0.9, edge_color='purple', style='dashed',
+                                  connectionstyle='arc3,rad=0.2', label='Complex Dependency')
             nx.draw_networkx_edges(self.repository_graph, pos, edgelist=other_edges, 
                                   width=1.5, alpha=0.7, edge_color='gray', 
                                   connectionstyle='arc3,rad=0.1', label='Other')

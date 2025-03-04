@@ -48,6 +48,38 @@ class AdvancedDetection:
                                 remote_chains.append(path)
         
         return remote_chains
+        
+    @staticmethod
+    def find_complex_dependency_paths(graph: nx.DiGraph) -> List[List[str]]:
+        """
+        Find paths that involve complex dependencies between virtual and remote repositories.
+        This specifically looks for patterns like:
+        virtual repo -> includes -> remote repo -> points to -> another virtual repo
+        """
+        # Create a subgraph with relevant edges
+        complex_graph = nx.DiGraph()
+        
+        # First, add all edges that are part of complex dependencies
+        for u, v, data in graph.edges(data=True):
+            if data.get('edge_type') == 'complex_dependency':
+                complex_graph.add_edge(u, v)
+                
+        # Find longer paths through this graph that might form a complex dependency chain
+        complex_paths = []
+        for node in complex_graph.nodes():
+            if complex_graph.out_degree(node) > 0:
+                for target in complex_graph.nodes():
+                    if node != target:
+                        for path in nx.all_simple_paths(complex_graph, node, target, cutoff=5):
+                            if len(path) > 1:
+                                # If this path forms a cycle in the original graph, add it
+                                if nx.has_path(graph, path[-1], path[0]):
+                                    full_path = path + [path[0]]  # Complete the cycle
+                                    complex_paths.append(full_path)
+                                else:
+                                    complex_paths.append(path)
+        
+        return complex_paths
     
     @staticmethod
     def find_cross_instance_loops(graph: nx.DiGraph) -> List[List[str]]:
@@ -141,6 +173,7 @@ class AdvancedDetection:
         results = {
             'include_cycles': AdvancedDetection.find_include_cycles(graph),
             'remote_chains': AdvancedDetection.find_remote_chains(graph),
+            'complex_dependency_paths': AdvancedDetection.find_complex_dependency_paths(graph),
             'cross_instance_loops': AdvancedDetection.find_cross_instance_loops(graph),
             'shadowed_repositories': AdvancedDetection.detect_repository_shadowing(graph),
             'long_dependency_chains': AdvancedDetection.detect_long_dependency_chains(graph),

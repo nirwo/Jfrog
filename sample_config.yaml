@@ -1,0 +1,27 @@
+# JFrog Artifactory Analyzer Configuration
+
+# Define your Artifactory instances here
+artifactory_instances:
+  - name: artifactory1  # A friendly name for this instance
+    url: https://artifactory1.example.com/artifactory
+    # Authentication: Use either an API key or username/password
+    api_key: YOUR_API_KEY_HERE
+    # username: admin
+    # password: password
+
+  - name: artifactory2
+    url: https://artifactory2.example.com/artifactory
+    api_key: YOUR_API_KEY_HERE
+
+# Optional Configuration
+settings:
+  # Report options
+  report:
+    output_file: report.html
+    include_visualization: true
+  
+  # Visualization options
+  visualization:
+    output_file: repository_graph.png
+    include_unknown_repositories: true
+    show_repository_details: true
